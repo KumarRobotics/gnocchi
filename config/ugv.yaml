@@ -1,0 +1,169 @@
+# UGV: BIEVR-LIO odometry (RKO-LIO before 2026-11-05) with GNSS position and dual-antenna heading priors.
+# Fuses the two receivers' raw fixes as their midpoint (gnss.receivers): measurements
+# rather than an estimator posterior, and independent of which receiver PX4 numbers
+# gps1. See README for the rest.
+/**/gnocchi:
+  ros__parameters:    
+    enable_gnss: true # false: only publish static identity world -> ugv_map -> odom for indoor tests.
+    publish_on_trigger: false
+    initialization_trigger_topic: /initialization_trigger
+    topics:
+      odom: bievr_lio/odom   # was rko_lio/odometry; sensors_lio.launch.py lio:=rko_lio
+      gnss: mavros/global_position/raw/fix   # only when gnss.receivers is empty (single-fix setups)
+      output_odom: odom_map
+      output_odom_throttled: odom_map_throttled
+      output_pose: pose_map
+      output_pose_throttled: pose_map_throttled
+    extrinsics:
+      # Antenna MIDPOINT in base_link (FLU), as gnss.receivers fuses the midpoint.
+      # It is base_link horizontally on this UGV. Height only offsets GNSS altitude,
+      # which is not fused (fuse_altitude: false), so it is left at 0.
+      gnss_antenna: {x: 0.0, y: 0.0, z: 0.0}
+    frames:
+      # ENU / UTM, absolute.
+      world: world
+      # NWU: +X north, +Y west. Origin is the first accepted fix.
+      map: ugv_map
+      map_yaw_deg: 90.0
+      odom: odom
+      base_link: base_link
+      expect_odom_child: base_link
+    publish_tf: true
+    keyframe:
+      distance: 0.5
+      angle_deg: 10.0
+      max_time: 1.0
+    odom:
+      # Translation is where lidar odometry is strong: rigid over a short window,
+      # so the fused pose follows the lidar locally.
+      translation_floor: 0.005
+      # Loose enough that heading still owns yaw, but ~5x tighter than the lidar's
+      # measured per-keyframe yaw drift rather than ~70x.
+      rotation_floor: 0.02
+      # This, not gnss.sigma, sets the distance over which GNSS may deform the
+      # chain: with a rigid chain the solution is just its best rigid fit to the
+      # GNSS priors, and scaling all those sigmas together does not move it.
+      translation_sigma_per_m: 0.05
+      rotation_sigma_per_m: 0.005
+      rotation_sigma_per_rad: 0.02
+      # Gravity-aligned odometry's own roll/pitch; yaw is the heading prior's.
+      attitude_sigma: 0.05
+      # Gravity-aligned odometry holds z; GNSS altitude is not fused.
+      z_sigma: 0.1
+    # Incremental LIO/GPS consistency checks; thresholds assume a slow UGV.
+    # Degraded mode may apply abrupt global corrections. See README limitations.
+    lio_health:
+      enabled: true
+      max_speed: 5.0
+      gps_max_speed: 5.0
+      disagreement: 3.0
+      window: 2.0
+      confirmation: 0.5
+      recovery: 30.0
+      degraded_translation_sigma: 10.0
+      degraded_rotation_sigma: 0.5
+    # GNSS-only output while lidar odometry is missing (crash/restart/stall).
+    # Position: GNSS fix (~0.5 m wander, 3 cm fix-to-fix in the bags). Yaw: the
+    # dual-antenna heading, with the FCU gyro carrying it through heading dropouts
+    # (up to 23 s under trees in the field bags). Roll/pitch are level: the FCU
+    # attitude was measured no closer to LIO than assuming level.
+    fallback:
+      enabled: true
+      imu_topic: mavros/imu/data   # '' = heading only, held at most 1 s across gaps
+      odom_timeout: 0.5            # s without odometry before switching
+      startup_wait: 10.0           # s after the first fix if odometry never arrives
+      odom_jump: 2.0               # m step between odometry messages = source restarted
+      rebuild_after: 2.0           # s; a shorter stall without a jump continues the old graph
+      on_lio_degraded: true        # also GNSS-only while lio_health flags LIO: largest output step
+                                   # 4.45 -> 0.65 m (long_road_bad), 2.46 -> 0.51 m (tree_tarp)
+      blend_time: 10.0             # s to fade the step from the last fused pose to GNSS
+      max_heading_age: 30.0        # s the gyro may bridge; beyond it nothing is published
+      altitude_tau: 0.0            # 0 holds the last fused height (0.58 m rms vs 1.21 m tracking
+                                   # GNSS altitude on ugv_gnocchi_long); >0: s low-pass on GNSS altitude change
+      z_sigma: 1.0
+      tilt_sigma_deg: 3.0
+      fused_yaw_sigma_floor_deg: 0.5
+      gyro_noise: 0.05
+      gyro_bias_random_walk: 1.0e-6
+      gyro_max_bias_deg: 2.0
+    # Weak relative GPS height after LIO failure; healthy operation is unchanged.
+    gps_height:
+      enabled: true
+      sigma_floor: 3.0
+      max_reported_sigma: 2.0
+      max_speed: 2.0
+      reference_window: 30.0
+      reference_delay: 3.0
+      recovery_ramp_time: 5.0 # seconds to fade the activation mismatch; 0 restores immediate correction
+    gnss:
+      # Both antennas, in either order. mavros' raw/fix is just whichever one PX4
+      # numbered first: the rover in 7 of the field bags, the base in 3. Their
+      # midpoint is fused; if one has no fix, the other is used alone, offset by
+      # what gnocchi learned from paired fixes (logged once: "Antenna offsets").
+      # One topic: a single receiver at extrinsics.gnss_antenna. Delete the line (or set [""]) for topics.gnss.
+      receivers: ["mavros/gpsstatus/gps1/raw", "mavros/gpsstatus/gps2/raw"]
+      pair_max_dt: 0.25        # s; the receivers' stamps are mavros receive times
+      min_offset_samples: 100  # paired, non-turning fixes before either may be used alone
+      # One-second minimum between position factors improves drift tracking and
+      # GPS recovery in bag tests; factors attach at eligible keyframes.
+      # Fix errors remain correlated over ~20-40 s: faster fusion also follows
+      # GPS bias more strongly and does not establish calibrated uncertainty.
+      min_interval: 1.0
+      sigma: 1.0   # floor tuned to reduce position jitter with one-second priors
+      max_sigma: 2.0
+      robust_k: 1.345
+      # Altitude is not fused: it is the weakest axis of the fix and the lidar
+      # odometry's z is better, so letting them fight only injects corrections.
+      fuse_altitude: false
+      sigma_z: 3.0
+    heading:
+      # Every GPS instance; whichever reports a valid yaw is used.
+      gnss_topics: ["mavros/gpsstatus/gps1/raw", "mavros/gpsstatus/gps2/raw"]
+      # Opt-in fallback when heading hardware/compass is unavailable. Requires
+      # motion before map output starts; ignores all external heading inputs.
+      initialize_from_positions: false
+      alignment:
+        window: 60.0          # seconds of recent data used only during initialization
+        min_samples: 10      # fixes spaced at least 1 s apart
+        min_baseline: 10.0   # metres of horizontal antenna-position span
+        max_residual: 1.5    # maximum horizontal fit RMS, metres
+        max_gap: 0.5         # maximum gap in bracketing LIO samples, seconds
+        sigma_floor_deg: 10.0
+        max_sigma_deg: 20.0
+      # Dual-antenna heading error is white once it is timed correctly, so every
+      # keyframe may have one.
+      min_interval: 0.0
+      # The message is stamped later than the epoch it describes. Measured on this
+      # airframe: the residual against odometry correlates with yaw rate at -0.88
+      # and collapses from 4.15 to 1.26 deg -- its own claimed accuracy -- at
+      # -0.240 s. RE-MEASURE THIS if the receiver, link or mavros version changes.
+      # It measured 218 / 243 / 267 ms across three runs, but the response is flat
+      # from roughly -0.18 to -0.45, so being in the right region is what matters and
+      # the exact value does not. Re-measure with gnocchi_tuning/lag_across_runs.py
+      # if the receiver, link or mavros version changes.
+      time_offset: -0.240
+      # Huber, whitened. Survives the occasional bad baseline without letting it
+      # rotate the graph.
+      robust_k: 1.345
+      # Do not interpolate a heading across a gap longer than this.
+      max_gap: 1.0
+      # Skip the prior while the heading slews faster than this. Any residual lag
+      # error costs yaw_rate * error, so mid-turn priors are the least trustworthy.
+      # 0 disables. See below: with the lag corrected this buys little, so it is off.
+      max_rate: 0.0
+      # Bounds on the receiver-reported hdg_acc. The floor stops an
+      # over-confident report pinning yaw absolutely; the ceiling rejects
+      # headings the receiver already knows are bad, e.g. on RTK loss.
+      gnss_sigma_floor: 0.005
+      gnss_sigma_max: 0.35
+    origin_z_sigma: 0.5
+    max_measurement_age: 0.5
+    optimizer:
+      fixed_lag: false
+      lag_time: 30.0
+      min_keyframes: 5
+
+    debug:
+      # Publishes the pose GNSS alone would give, to overlay in RViz.
+      publish_gnss_only: false
+      gnss_only_topic: debug/gnss_only

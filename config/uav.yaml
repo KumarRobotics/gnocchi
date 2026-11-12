@@ -1,0 +1,52 @@
+# UAV: GPS-only. topics.odom empty means no clock, no keyframes, no graph -- the
+# node becomes a GNSS-to-local-frame converter. No IMU: the output pose's yaw
+# comes from the heading prior, but roll/pitch is always level (0). UNVERIFIED
+# on real UAV data.
+/**/gnocchi:
+  ros__parameters:
+    enable_gnss: true
+    publish_on_trigger: true
+    initialization_trigger_topic: /initialization_trigger
+    topics:
+      odom: ""
+      gnss: mavros/global_position/global   # only when gnss.receivers is empty (single-fix setups)
+      # FCU-fused (baro+GPS+IMU) altitude relative to home, in place of the raw
+      # single-fix GNSS altitude for the output pose's z.
+      rel_altitude: mavros/global_position/rel_alt
+      output_odom: odom_map
+      output_odom_throttled: odom_map_throttled
+      output_pose: pose_map
+      output_pose_throttled: pose_map_throttled
+    heading:    
+      use_gnss_heading: true # if false, compass_hdg is used instead
+      # Every GPS instance; whichever reports a valid yaw is used.
+      gnss_topics: ["mavros/gpsstatus/gps1/raw", "mavros/gpsstatus/gps2/raw"]
+      compass_topic: mavros/global_position/compass_hdg
+      compass_sigma_deg: 5.0
+    extrinsics:
+      # Antenna MIDPOINT in base_link (FLU), as gnss.receivers fuses the midpoint,
+      # which is the body centre. z is unused: rel_altitude replaces GNSS height.
+      gnss_antenna: {x: 0.0, y: 0.0, z: 0.0}
+    frames:
+      # ENU / UTM, absolute.
+      world: world
+      # NWU: +X north, +Y west. Origin is the first accepted fix.
+      map: uav_map
+      map_yaw_deg: 90.0
+      base_link: base_link
+    # gps_only (no topics.odom) never gets a live TF edge to base_link -- nothing
+    # in this stack looks up base_link via TF, and it would conflict with the
+    # ZED's own VIO output (driver_launch's pos_tracking.publish_tf), which does
+    # own it. publish_tf here only turns on the static world -> uav_map edge that
+    # waypoint conversion and cross-vehicle frame reprojection need.
+    publish_tf: true
+    gnss:
+      # Both antennas, fused as their midpoint (see ugv.yaml / README): PX4's
+      # numbering of the two receivers changes between boots, so a single fix
+      # topic reports a different antenna from run to run. One topic: a single
+      # receiver at extrinsics.gnss_antenna. Delete the line (or set [""]) for topics.gnss.
+      receivers: ["mavros/gpsstatus/gps1/raw", "mavros/gpsstatus/gps2/raw"]
+      pair_max_dt: 0.25
+      min_offset_samples: 100
+      sigma: 0.5
+      max_sigma: 3.0
